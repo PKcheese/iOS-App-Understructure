@@ -9,14 +9,14 @@ final class MaquetteViewModel: ObservableObject {
     @Published var selectedItem: PhotosPickerItem?
     @Published var isUploading = false
     @Published var statusMessage: String?
-    @Published var savedModelURL: URL?
+    @Published var result: MaquetteResult?
 
     func uploadSelectedImage() async {
         guard let item = selectedItem else { return }
         do {
             isUploading = true
             statusMessage = "Preparing image…"
-            savedModelURL = nil
+            result = nil
 
             guard let data = try await item.loadTransferable(type: Data.self) else {
                 statusMessage = "Could not read the selected image."
@@ -28,9 +28,15 @@ final class MaquetteViewModel: ObservableObject {
             let mimeType = item.preferredMIMEType ?? UTType(filenameExtension: URL(fileURLWithPath: filename).pathExtension)?.preferredMIMEType ?? "image/jpeg"
 
             statusMessage = "Uploading…"
-            let modelURL = try await MaquetteService.makeMaquette(imageData: data, filename: filename, mimeType: mimeType)
-            savedModelURL = modelURL
-            statusMessage = "Saved model to \(modelURL.lastPathComponent)"
+            let maquetteResult = try await MaquetteService.makeMaquette(imageData: data, filename: filename, mimeType: mimeType)
+            result = maquetteResult
+            statusMessage = """
+Saved files:
+- \(maquetteResult.nonInteractiveURL.lastPathComponent)
+- \(maquetteResult.interactiveURL.lastPathComponent)
+- \(maquetteResult.gestureURL.lastPathComponent)
+- \(maquetteResult.zipURL.lastPathComponent)
+""".trimmingCharacters(in: .whitespacesAndNewlines)
         } catch {
             statusMessage = "Upload failed: \(error.localizedDescription)"
         }

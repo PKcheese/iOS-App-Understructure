@@ -4,15 +4,18 @@ import SceneKit
 import SceneKit.ModelIO
 import MetalKit
 import ModelIO
+import Combine
 
 struct ContentView: View {
     @StateObject private var viewModel = MaquetteViewModel()
     @State private var isShowingViewer = false
+    @State private var activePreviewURL: URL?
+    @State private var activePreviewTitle: String?
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 24) {
-                PhotosPicker(selection: $viewModel.selectedItem, matching: .images) {
+                PhotosPicker(selection: selectedItemBinding, matching: .images) {
                     Label("Choose Photo", systemImage: "photo")
                         .frame(maxWidth: .infinity)
                 }
@@ -39,17 +42,39 @@ struct ContentView: View {
                         .padding(.horizontal)
                 }
 
-                if let url = viewModel.savedModelURL {
+                if let result = viewModel.result {
                     Button {
+                        activePreviewURL = result.nonInteractiveURL
+                        activePreviewTitle = "Non-interactive"
                         isShowingViewer = true
                     } label: {
-                        Label("View GLB", systemImage: "cube")
+                        Label("View Non-interactive", systemImage: "cube")
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.bordered)
 
-                    ShareLink(item: url) {
-                        Label("Share GLB", systemImage: "square.and.arrow.up")
+                    Button {
+                        activePreviewURL = result.interactiveURL
+                        activePreviewTitle = "Interactive"
+                        isShowingViewer = true
+                    } label: {
+                        Label("View Interactive", systemImage: "cube.transmission")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button {
+                        activePreviewURL = result.gestureURL
+                        activePreviewTitle = "Gesture Overlay"
+                        isShowingViewer = true
+                    } label: {
+                        Label("View Gesture", systemImage: "hand.draw")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+
+                    ShareLink(item: result.zipURL) {
+                        Label("Share Zip", systemImage: "square.and.arrow.up")
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.bordered)
@@ -60,23 +85,49 @@ struct ContentView: View {
             .padding()
             .navigationTitle("Understructure AI")
             .sheet(isPresented: $isShowingViewer) {
-                if let url = viewModel.savedModelURL {
-                    NavigationStack {
-                        GLBViewerView(url: url)
-                            .ignoresSafeArea()
-                            .navigationTitle("Preview")
-                            .toolbar {
-                                ToolbarItem(placement: .cancellationAction) {
-                                    Button("Done") { isShowingViewer = false }
+                if let url = activePreviewURL {
+                    if url.pathExtension.lowercased() == "png" {
+                        NavigationStack {
+                            ImagePreviewView(url: url)
+                                .ignoresSafeArea()
+                                .navigationTitle(activePreviewTitle ?? "Preview")
+                                .toolbar {
+                                    ToolbarItem(placement: .cancellationAction) {
+                                        Button("Done") { isShowingViewer = false }
+                                    }
                                 }
-                            }
+                        }
+                    } else {
+                        NavigationStack {
+                            PreviewView(url: url)
+                                .ignoresSafeArea()
+                                .navigationTitle(activePreviewTitle ?? "Preview")
+                                .toolbar {
+                                    ToolbarItem(placement: .cancellationAction) {
+                                        Button("Done") { isShowingViewer = false }
+                                    }
+                                }
+                        }
                     }
                 }
             }
-            .onChange(of: viewModel.savedModelURL) { _, _ in
-                isShowingViewer = false
+            .onChange(of: viewModel.result) { _ in
+                resetPreviewState()
             }
         }
+    }
+
+    private var selectedItemBinding: Binding<PhotosPickerItem?> {
+        Binding(
+            get: { viewModel.selectedItem },
+            set: { viewModel.selectedItem = $0 }
+        )
+    }
+
+    private func resetPreviewState() {
+        isShowingViewer = false
+        activePreviewURL = nil
+        activePreviewTitle = nil
     }
 }
 
@@ -84,10 +135,10 @@ struct ContentView: View {
     ContentView()
 }
 
-struct GLBViewerView: UIViewRepresentable {
+struct PreviewView: UIViewRepresentable {
     let url: URL
 
-    func makeUIView(context: Context) -> SCNView {
+    func makeUIView(context: Context) -> UIView {
         let view = SCNView()
         view.backgroundColor = .systemBackground
         view.allowsCameraControl = true
@@ -96,17 +147,23 @@ struct GLBViewerView: UIViewRepresentable {
         return view
     }
 
-    func updateUIView(_ uiView: SCNView, context: Context) {
-        loadScene(into: uiView)
+    func updateUIView(_ uiView: UIView, context: Context) {
+        if let scnView = uiView as? SCNView {
+            loadScene(into: scnView)
+        }
     }
 
     private func loadScene(into view: SCNView) {
         DispatchQueue.global(qos: .userInitiated).async {
             let scene = buildScene()
             DispatchQueue.main.async {
-                view.scene = scene
-                print("Scene node count:", scene?.rootNode.childNodes.count ?? 0)
-                if let scene = scene { printSceneNodes(scene.rootNode, depth: 0) }
+                if let scene = scene {
+                    view.scene = scene
+                    print("Loaded scene with", scene.rootNode.childNodes.count, "children")
+                    printSceneNodes(scene.rootNode, depth: 0)
+                } else {
+                    print("Failed to load scene at", url.path)
+                }
             }
         }
     }
@@ -114,23 +171,25 @@ struct GLBViewerView: UIViewRepresentable {
     private func buildScene() -> SCNScene? {
         if let device = MTLCreateSystemDefaultDevice() {
             let allocator = MTKMeshBufferAllocator(device: device)
-            if let asset = try? MDLAsset(url: url, vertexDescriptor: nil, bufferAllocator: allocator) {
+            do {
+                let asset = try MDLAsset(url: url, vertexDescriptor: nil, bufferAllocator: allocator)
                 asset.loadTextures()
-                MDLAsset.load()
                 let scene = SCNScene(mdlAsset: asset)
                 prepare(scene)
                 return scene
+            } catch {
+                print("ModelIO load failed:", error)
             }
         }
         if let scene = try? SCNScene(url: url, options: [SCNSceneSource.LoadingOption.checkConsistency: true]) {
             prepare(scene)
             return scene
         }
-        if let source = try? SCNSceneSource(url: url, options: nil),
-           let scene = source.scene(options: nil) {
+        if let source = try? SCNSceneSource(url: url, options: nil), let scene = source.scene(options: nil) {
             prepare(scene)
             return scene
         }
+        print("All scene loading strategies failed for", url.path)
         return nil
     }
 
